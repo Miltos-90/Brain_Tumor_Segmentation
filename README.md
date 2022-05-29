@@ -1,6 +1,7 @@
+# Semantic segmentation of gliomas in pre-operative MRI scans.
+
 ## Problem definiton
 
-Semantic segmentation of gliomas in pre-operative MRI scans. 
 Each MRI consists of 155 240 x 240 patches, in which each pixel is part of a tumor area:
 
 The sub-regions of tumor considered for evaluation are: 
