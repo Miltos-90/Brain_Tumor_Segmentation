@@ -48,7 +48,6 @@ sys.stdout = open(config.LOG_FILE, 'w')
 
 ```python
 df = utils.collectMetadata()
-utils.makeSummary(df)
 ```
 
 We have a lot of empty patches (these are usually the first few and last few patches on an MRI that are completely empty), and a lot of patches containing only background (i.e. a brain slice with the background label only).
@@ -94,11 +93,7 @@ traindf, valdf, testdf = df.loc[lIdx], df.loc[vIdx], df.loc[tIdx]
 
 traindf = utils.subsample(traindf, config.BACKGROUND_RATIO)
 valdf   = utils.subsample(valdf,   config.BACKGROUND_RATIO)
-
-utils.makeSummary(traindf)
 ```
-
-That's a bit less than half the original dataset
 
 ## Training setup
 
