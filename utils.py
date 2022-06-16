@@ -1,136 +1,132 @@
-# Libraries
+
+
 import config
 import os
-import torchio as tio
-import torch
-import numpy as np
-import torch.nn.functional as F
-from torch.autograd import Variable
 import pandas as pd
-import nibabel as nib
-from tqdm.notebook import tqdm
+import numpy as np
 import matplotlib.pyplot as plt
-from torch.utils.data import DataLoader, Dataset
-import segmentation_models_pytorch as smp
+import nibabel as nib
+import torch
+import torchio as tio
+from torch.utils.data import Dataset
+import h5py
 
-''' Dataset class '''
+''' Dataset class'''
 class BRATSDataset(Dataset):
     
-    def __init__(self, flairImageDir, t2ImageDir, segmentationDir, patchNumber, transform):
-        
-        self.flairImages = flairImageDir
-        self.t2Images    = t2ImageDir
-        self.labels      = segmentationDir
-        self.patch       = patchNumber
-        self.transform   = transform
+    def __init__(self, filename, noSamples, transform):
+
+        self.file  = h5py.File(filename, "r") # open h5 file
+        self.noSamples = noSamples
+        self.transform = transform
 
     def __len__(self):
-        return len(self.labels)
+        return self.noSamples
 
     def __getitem__(self, idx):
-        
-        # Get filenames
-        flairPath = self.flairImages[idx]
-        t2Path    = self.t2Images[idx]
-        segPath   = self.labels[idx]
-        patchNo   = self.patch[idx]
-        
-        # Read from disk (uncached). Dimensions (Width, Height)
-        flair = np.asarray(nib.load(flairPath).dataobj)[:, :, patchNo]
-        t2    = np.asarray(nib.load(t2Path).dataobj)[:, :, patchNo]
-        y     = np.asarray(nib.load(segPath).dataobj)[:, :, patchNo].astype(np.uint8)
 
-        # Expand dimensions [C x H x W x D] (required for the transformations)
-        flair = flair[np.newaxis, :, :, np.newaxis]
-        t2    = t2[np.newaxis, :, :, np.newaxis]
-        y     = y[np.newaxis, :, :, np.newaxis]
+        # Read from file [Dimensions x: C x H x W, y: 1 x H x W]
+        t = torch.tensor(self.file[str(idx)])    
+        x = t[0:-1, :, :].float()
+        y = t[-1, :, :].long()
 
-        # Apply transformations
-        out  = self.transform({'flair_mri': torch.tensor(flair),
-                               't2_mri':    torch.tensor(t2), 
-                               'mask':      torch.tensor(y)})
 
-        x = torch.cat((out['flair_mri'], out['t2_mri']), dim = 0)
-        y = out['mask']
-        
-        # Remove depth dimension
-        x = x.squeeze(dim = -1)
-        y = y.squeeze(dim = -1)
-        
-        # Remove channel dimension from targets
+        if self.transform is not None:
+            # Expand dimensions [C x H x W x D] (required for the transformations)
+            x, y = x[..., None], y[None, ..., None]
+            
+            # Apply transformations (split needed for proper normalisation of each channel)
+            out  = self.transform({'x1': x[0,...][None, ...], # Dims: 1 x H x W x D
+                                   'x2': x[1,...][None, ...], # Dims: 1 x H x W x D
+                                   'x3': x[2,...][None, ...], # Dims: 1 x H x W x D
+                                   'y' : y})                  # Dims: 1 x H x W x D
+
+            x = torch.cat([out['x1'], out['x2'], out['x3']], dim = 0) # Dims: C x H x W x D
+            y = out['y']                                              # Dims: 1 x H x W x D
+
+            # Remove depth dimension (Dims: C(x)/1(y) x H x W)
+            x, y = x.squeeze(dim = -1), y.squeeze(dim = -1)
+
+        # Remove channel dimension from targets (Dims: H, W)
         y = y.squeeze(dim = 0)
-        
+
         return x, y
 
-''' Convenience function to return a dataloader '''
-def makeDataloader(df, transform, shuffle,
-                   batchSize = config.BATCHSIZE, 
-                   workers   = config.LOADER_WORKERS):
+
+''' Makes a dataframe containing paths to the input files and corresponding masks '''
+def makeFileList(filepath = config.RAW_DATA_PATH):
     
-    # Make a dataset
-    dataset = BRATSDataset(flairImageDir   = df['flairPath'].values,
-                           t2ImageDir      = df['t2Path'].values,
-                           segmentationDir = df['labelPath'].values,
-                           patchNumber     = df['patch'].values,
-                           transform       = transform)
+    records = []
+
+    for folder in os.listdir(filepath):
+        subfolder = os.path.join(filepath, folder)
+
+        if os.path.isdir(subfolder):
+            filelist = sorted(os.listdir(subfolder))
+            records.append([os.path.join(subfolder, file) for file in filelist])
+
+    df = pd.DataFrame.from_records(records, columns = ['flair', 'seg', 't1', 't1ce', 't2'])
     
-    # Make dataloader
-    dataloader = DataLoader(
-        dataset            = dataset,
-        batch_size         = batchSize,
-        num_workers        = workers,
-        shuffle            = shuffle,
-        pin_memory         = True,
-        persistent_workers = False)
+    return df
+
+
+''' Plots a datapoint '''
+def plotSample(paths):
     
-    return dataloader
-
-
-''' Resamples the df to downsample the background-only patches, and remove empty patches''' 
-def subsample(df, backgroundRatio, seedNo = 45): # fraction of patches to keep containing only background label
+    fig, ax = plt.subplots(nrows = 1, ncols = 5, figsize = (15, 5))
     
-    np.random.seed(seedNo) # Reproducibility
+    for idx, path in enumerate(paths):
 
-    # List containing patches with foreground labels
-    foregroundLabel = df.index[df['containsNCRNET'] | df['containsED'] | df['containsET']].values
-
-    # List containing patches with background label only
-    backgroundOnly  = df.index[df['BKGPatch']].values
-
-    # Subsample the background-only patches
-    noBackgroundPatches = len(backgroundOnly)
-
-    # Randomly select a number of patches to keep from the background-only patches
-    backgroundOnlyIdx = np.random.randint(low = 0, high = noBackgroundPatches, size = int(noBackgroundPatches * backgroundRatio))
-    backgroundOnly    = backgroundOnly[backgroundOnlyIdx]
-
-    # Merge the subsampled backgroung patches w/ the foreground patches
-    samplesToKeep = np.union1d(foregroundLabel, backgroundOnly)
-
-    return df.loc[samplesToKeep, :]
+        x = np.asarray(nib.load(path).dataobj)
+        D = x.shape[2]
+        ax[idx].imshow(x[:, :, D // 2], cmap = 'bone')
+        
+        mriType = path.split('/')[-1].split('_')[-1].split('.')[0]
+        ax[idx].set_title(mriType)
+        ax[idx].axis('off')
+        
+    return 
 
 
-''' Split data into two disjoint subsets based on a group column'''
-def GroupTrainTestSplit(groupColumn, testRatio, seedNo = 45):
+''' Splits data in train/val/test sets'''
+def split(df, 
+          trainRatio = config.TRAIN_RATIO, 
+          valRatio   = config.VAL_RATIO, 
+          seed       = config.SEED):
     
-    # Shuffle
-    groupColumn = groupColumn.sample(frac = 1, random_state = seedNo)
-    
-    np.random.seed(seedNo) # Reproducibility
+    # Reproducibility
+    np.random.seed(seed)
 
-    # Get groups to appear in train and test sets
-    noUniqueGroups = groupColumn.unique().shape[0]
-    testGroups     = np.random.randint(low = 0, high = noUniqueGroups - 1, size=int(noUniqueGroups * testRatio))
-    trainGroups    = np.setdiff1d(groupColumn, testGroups)
+    # No samples in train/val/test sets
+    samples      = df.shape[0]
+    trainSamples = np.floor(samples * trainRatio).astype(int)
+    valSamples   = np.floor(samples * valRatio).astype(int)
+    testSamples  = samples - trainSamples - valSamples
 
-    # Get indices of the corresponding groups
-    trainGroupIdx = groupColumn[groupColumn.isin(trainGroups)].index.tolist()
-    testGroupIdx  = groupColumn[groupColumn.isin(testGroups)].index.tolist()
+    # Shuffle indices
+    idx = np.arange(0, samples)
+    np.random.shuffle(idx)
 
-    return trainGroupIdx, testGroupIdx
+    # Choose indices for train/val/test sets
+    trainidx = idx[0:trainSamples]
+    validx   = idx[(trainSamples + 1): (trainSamples + valSamples)]
+    testidx  = idx[(trainSamples + valSamples + 1) : samples]
+
+    # Split datasets
+    traindf = df.iloc[trainidx, :]
+    valdf   = df.iloc[validx, :]
+    testdf  = df.iloc[testidx, :]
+
+    return traindf, valdf, testdf
+
+''' Mask function for the transformations '''
+def maskFunction(tensor):
+    mask = torch.zeros_like(tensor, dtype = bool)
+    mask[tensor > 0] = True
+    return mask
 
 
-''' Make a generic pytorch checkpoint '''
+# Make a generic pytorch checkpoint
 def makeCheckpoint(epoch, model, optimizer, scheduler, scaler, trainLoss, valLoss, bestValLoss, verbose = True):
     
     if verbose:
@@ -160,14 +156,14 @@ def makeCheckpoint(epoch, model, optimizer, scheduler, scaler, trainLoss, valLos
     return bestValLoss
 
 
-''' Load a genetic pytorch checkpoint'''
-def loadCheckpoint(model, optimizer, scheduler, scaler, filePath):
+# Load a genetic pytorch checkpoint
+def loadCheckpoint(model, optimizer, scheduler, scaler, filePath, mapLocation = config.DEVICE):
     
     if os.path.exists(filePath):
 
         print('Loading checkpoint...')
         
-        checkpoint = torch.load(filePath)
+        checkpoint = torch.load(filePath, map_location = mapLocation)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         scaler.load_state_dict(checkpoint['scaler_state_dict'])
@@ -190,166 +186,37 @@ def loadCheckpoint(model, optimizer, scheduler, scaler, filePath):
     return model, optimizer, scheduler, scaler, epoch, trainLoss, valLoss, bestValLoss
 
 
-''' Make lists containing paths to the input files and corresponding masks '''
-def _zipDirectories(filepath = config.FILEPATH):
+'''  Computes various metrics from TP, FP, FN, TN '''
+def computeMetrics(TP, FP, FN , TN):
+
+    ACC  = (TP + TN) / (TP + TN + FP + FN)
+    P    = TP / (TP + FP)
+    R    = TP / (TP + FN)
+    F1   = 2 * P * R / (P + R)
+    IOU  = TP / (TP + FP + FN)
+    DICE = 2 * TP / (2 * TP + FP + FN)
+
+    print('Precision:\t',  P[1:].cpu().numpy().round(3))
+    print('Recall: \t',    R[1:].cpu().numpy().round(3))
+    print('Accuracy:\t',   ACC[1:].cpu().numpy().round(3))
+    print('F1 score:\t',   F1[1:].cpu().numpy().round(3))
+    print('IoU score:\t',  IOU[1:].cpu().numpy().round(3))
+    print('DICE score:\t', DICE[1:].cpu().numpy().round(3))
     
-    flairFiles, t1Files, t1ceFiles, t2Files, outputFiles  = [], [], [], [], []
-    
-    # Loop over all folders (each folder contains training sample)
-    for folder in os.listdir(filepath):
-        subfolder = os.path.join(filepath, folder)
-        
-        if os.path.isdir(subfolder):
-            fileList  = os.listdir(subfolder)
-            try:
-                t1File    = np.argmax(['_t1.nii'    in file for file in fileList])
-                t1ceFile  = np.argmax(['_t1ce.nii'  in file for file in fileList])
-                t2File    = np.argmax(['_t2.nii'    in file for file in fileList])
-                flairFile = np.argmax(['_flair.nii' in file for file in fileList])
-                outFile   = np.argmax(['_seg.nii'   in file for file in fileList])
-                                
-                flairFiles.append(  os.path.join(subfolder, fileList[flairFile]) )
-                t1Files.append(     os.path.join(subfolder, fileList[t1File])    )
-                t1ceFiles.append(   os.path.join(subfolder, fileList[t1ceFile])  )
-                t2Files.append(     os.path.join(subfolder, fileList[t2File])    )
-                outputFiles.append( os.path.join(subfolder, fileList[outFile])   )
-            except: # File 355 does not contain a valid segmentation file
-                pass
-    
-    return zip(flairFiles, t1Files, t1ceFiles, t2Files, outputFiles)
-
-
-''' Collects metadata from the entire dataset '''
-def collectMetadata(filepath = config.FILEPATH):
-    
-    df = [] # List of dataframes containing metadata
-    noFiles = 369
-
-    for subjectNo, (flairPth, t1Pth, t1cePth, t2Pth, labPth) \
-    in tqdm(enumerate(_zipDirectories(filepath)), total = noFiles):
-
-        x = nib.load(flairPth).get_fdata()
-        y = nib.load(labPth).get_fdata()
-
-        H, W, D = x.shape
-        HW = H * W
-
-        xFlat = x.reshape(1, -1, D).squeeze() # Flatten height, width dimension
-        yFlat = y.reshape(1, -1, D).squeeze() # Flatten height, width dimension
-
-        emptyPatch         = np.all(xFlat == 0, axis = 0) # Completely empty patch
-        BKGpixelPercent    = np.sum(yFlat == 0, axis = 0) / HW * 100
-        NCRNETpixelPercent = np.sum(yFlat == 1, axis = 0) / HW * 100
-        EDpixelPercent     = np.sum(yFlat == 2, axis = 0) / HW * 100
-        ETpixelPercent     = np.sum(yFlat == 4, axis = 0) / HW * 100
-
-        containsNCRNET  = np.any(yFlat == 1, axis = 0) # Patch with label 1
-        containsED      = np.any(yFlat == 2, axis = 0) # Patch with label 2
-        containsET      = np.any(yFlat == 4, axis = 0) # Patch with label 4
-        containsBKGonly = (BKGpixelPercent > 0) & ~(emptyPatch | containsNCRNET | containsED | containsED)
-        patchNo         = np.arange(D)                 # Patch ID
-
-        # Make dataframe
-        curdf = pd.DataFrame.from_dict({
-        'patch':          patchNo,
-        'emptyPatch':     emptyPatch,
-        'BKGPatch':       containsBKGonly,
-        'containsNCRNET': containsNCRNET,
-        'containsED':     containsED,
-        'containsET':     containsET,
-        'NCRNETpixels':   NCRNETpixelPercent,
-        'EDpixels':       EDpixelPercent,
-        'ETpixels':       ETpixelPercent,
-        'BKGpixels':      BKGpixelPercent,
-        })
-
-        curdf['flairPath'] = flairPth
-        curdf['t1Path']    = t1Pth
-        curdf['t1cePath']  = t1cePth
-        curdf['t2Path']    = t2Pth
-        curdf['labelPath'] = labPth
-        curdf['subjectID'] = subjectNo
-
-        # Append to list
-        df.append(curdf)
-
-    # concatenate
-    df = pd.concat(df, axis = 0, ignore_index = True)
-    
-    return df
-
-
-''' Prints a summary of the metadata collected by the collectMetadata() function '''
-def makeSummary(df):
-
-    emptyPatches   = df['emptyPatch'].sum()
-    NCR_NETpatches = df['containsNCRNET'].sum()
-    EDpatches      = df['containsED'].sum()
-    ETpatches      = df['containsET'].sum()
-    bkgOnlyPatches = df['BKGPatch'].sum()
-    allLabels      = (df['containsNCRNET'] & df['containsED'] & df['containsET']).sum()
-    noSubjects     = df['subjectID'].unique().shape[0]
-
-    print(f'No. subjects: {noSubjects}')
-    print(f'No. patches: {df.shape[0]}')
-    print(f'No. empty patches: {emptyPatches}')
-    print(f'No. patches containing only background: {bkgOnlyPatches}')
-    print(f'No. patches containing NCR/NET label: {NCR_NETpatches}')
-    print(f'No. patches containing ED label: {EDpatches}')
-    print(f'No. patches containing ET label: {ETpatches}')
-    print(f'No. patches containing all labels: {allLabels}')
-
-    metaSummary = df[['BKGpixels', 'NCRNETpixels', 'EDpixels', 'ETpixels']].describe()
-    
-    return metaSummary.loc[['mean', 'std', 'max']]
-
-
-''' Plots a batch from the dataloader'''
-def plotBatch(x, y):
-    
-    B, C = x.shape[0], x.shape[1]
-
-    for sampleNo in range(B): # Loop over batches
-
-        fig, ax = plt.subplots(nrows = 1, ncols = 3, figsize = (8, 5))
-
-        for channel in range(C): # Loop over channels (image types)
-
-            # Plot image type
-            img = x.numpy()[sampleNo, channel, :, :]
-            ax[channel].imshow(img, cmap = 'bone')
-            ax[channel].axis('off');
-
-        # Plot label
-        labels = y[sampleNo, :, :, :].squeeze(dim = 0)
-        ax[-1].imshow(labels)
-        ax[-1].axis('off');
-        
     return 
-    
-    
-''' Evaluates several metrics on a given dataset '''
-def computeMetrics(TP, FP, FN, TN, reduction = 'macro-imagewise'):
 
-    accuracy    = smp.metrics.accuracy(    TP, FP, FN, TN, reduction = reduction).item()
-    precision   = smp.metrics.precision(   TP, FP, FN, TN, reduction = reduction).item()
-    recall      = smp.metrics.recall(      TP, FP, FN, TN, reduction = reduction).item()
-    sensitivity = smp.metrics.sensitivity( TP, FP, FN, TN, reduction = reduction).item()
-    specificity = smp.metrics.specificity( TP, FP, FN, TN, reduction = reduction).item()
-    iou_score   = smp.metrics.iou_score(   TP, FP, FN, TN, reduction = reduction).item()
-    f1_score    = smp.metrics.f1_score(    TP, FP, FN, TN, reduction = reduction).item()
-    f2_score    = smp.metrics.fbeta_score( TP, FP, FN, TN, beta = 2, reduction = reduction).item()
 
-    print(f'Image-wise macro-averaged Accuracy:\t {accuracy:.3f}')
-    print(f'Image-wise macro-averaged Precision:\t {precision:.3f}')
-    print(f'Image-wise macro-averaged Recall:\t {recall:.3f}')
-    print(f'Image-wise macro-averaged Sensitivity:\t {sensitivity:.3f}')
-    print(f'Image-wise macro-averaged Specificity:\t {specificity:.3f}')
-    print(f'Image-wise macro-averaged F1 Score:\t {f1_score:.3f}')
-    print(f'Image-wise macro-averaged F2 Score:\t {f2_score:.3f}')
-    print(f'Image-wise macro-averaged IoU Score:\t {iou_score:.3f}')
+''' Save a sample to gif '''
+def makeGifs(x, y, yhat, folder):
+
+    os.makedirs(folder)
+
+    mri   = tio.ScalarImage(tensor = torch.permute(x, (1,2,3,0)))
+    tAct  = tio.LabelMap(tensor = torch.permute(y, (1,2,3,0)))
+    tPred = tio.LabelMap(tensor = torch.permute(yhat, (1,2,3,0)))
+    
+    mri.to_gif(  output_path = folder + 'mri.gif', axis = 2, duration = 3, rescale = True)
+    tAct.to_gif( output_path = folder + 'act.gif', axis = 2, duration = 3, rescale = True)
+    tPred.to_gif(output_path = folder + 'pred.gif', axis = 2, duration = 3, rescale = True)
     
     return
-    
-    
-    

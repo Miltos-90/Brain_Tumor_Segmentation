@@ -1,31 +1,37 @@
-FILEPATH             = '/kaggle/input/brats20-dataset-training-validation/BraTS2020_TrainingData/MICCAI_BraTS2020_TrainingData/'
+
+# Preprocessing parameters
+PATCH_SIZE           = (128, 128)        # patch size
+PATCH_STRIDE         = (64, 64)          # patch overlap
+CLASS_RATIO          = 0.05              # Percentage of every slice containing at least one tumor class
+SEED                 = 123               # seed for train/val/test split
+TRAIN_RATIO          = 0.7               # Ratio of dataset to keep for the train set
+VAL_RATIO            = 0.15              # Ratio of dataset to keep for the validation set
+LOADER_WORKERS       = 0                 # No. workers for the dataloaders
+
+# Learning parameters
 DEVICE               = 'cuda'
+EPOCHS               = 100               # Total training epochs
+BATCHSIZE            = 128               # Train / validation loader batchsize
+ENCODER_NAME         = 'resnet18'        # Backbone. See: https://smp.readthedocs.io/en/latest/encoders.html
+ENCODER_WEIGHTS      = None              # Pretrained weights
+ENCODER_DEPTH        = 3                 # No. downsampling operations in the encoder
+ENCODER_IN_CHANNEL   = 3                 # Input channels for the model
+DECODER_CHANNELS     = (64, 32, 16)      # list of numbers of Conv2D layer filters in decoder blocks
+NO_CLASSES           = 4                 # No. classes in the segmentation task
+LOSS_GAMMA           = 2                 # Focal loss exponent
+SCHEDULER_FACTOR     = 0.33              # Multiplicative factor to reduce learning rate on plateau
+SCHEDULER_PATIENCE   = 2                 # Number of epochs with no improvement after which learning rate will be reduced
+LEARN_RATE           = 1e-4              # Optimizer learning rate
+WEIGHT_DECAY         = 1e-4
+
+# Path containing the raw MRI images
+RAW_DATA_PATH        = './data/MICCAI_BraTS2020_TrainingData/'
+
+# Paths containing the train/validation processed (sliced and patched) data
+TRAIN_FILE           = './data/brats2020-processed/train.h5'
+VAL_FILE             = './data/brats2020-processed/val.h5'
+
+# Paths for checkpoints and logs
 LOG_FILE             = 'logfile.txt'
 LAST_CHECKPOINT      = 'checkpoint.pt'
 BEST_CHECKPOINT      = 'best_checkpoint.pt'
-NO_CLASSES           = 4                 # No. classes in the segmentation task
-LOADER_WORKERS       = 0                 # No. workers for the dataloaders
-TEST_RATIO           = 0.15              # Ratio of dataset to keep for the test set
-VAL_RATIO            = 0.15              # Ratio of dataset to keep for the validation set
-BACKGROUND_RATIO     = 0.1               # Ratio of background-only patches to retain during training (% of total)
-TRANSFORM_TYPE       = 'full'            # / 'minimal'. Type of image augmentation to be performed. See engine.py
-ENCODER_NAME         = 'efficientnet-b0' # Unet backbone model. See: https://smp.readthedocs.io/en/latest/encoders.html
-ENCODER_WEIGHTS      = None              # Pretrained weights
-ENCODER_IN_CHANNEL   = 2                 # Input channels for the model
-LOSS_ALPHA           = 2.0/100.0         # Focal loss alpha parameter
-LOSS_GAMMA           = 2.4               # Focal loss gamma parameter
-LOSS_NORM            = False             # Compute normalised version of focal loss
-SCHEDULER_FACTOR     = 0.33              # Multiplicative factor to reduce learning rate on plateau
-SCHEDULER_PATIENCE   = 4                 # Number of epochs with no improvement after which learning rate will be reduced
-BATCHSIZE            = 192               # Train / validation / test loader batchsize
-LEARN_RATE           = 2.48e-3           # Optimizer learning rate
-EPOCHS               = 40                # Total training epochs
-IMG_SIZE             = (160, 160, 1)     # Image dimensions at the end of augmentations
-LABEL_REMAP = {0:0, 1:1, 2:2, 4:3}       # Fix messed-up labeling on the dataset
-
-# Install additional packages
-import subprocess
-import sys
-subprocess.check_call([sys.executable, "-m", "pip", "install", "torchio", "--quiet"])
-subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", "git+https://github.com/qubvel/segmentation_models.pytorch", "--quiet"])
-subprocess.check_call([sys.executable, "-m", "pip", "install", "torch-lr-finder", "--quiet"])
