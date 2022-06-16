@@ -1,131 +1,171 @@
-# Semantic segmentation of gliomas in pre-operative MRI scans.
+import engine
+import config
+import utils
+from preprocess import makeDataset
+import pandas as pd
+import torchio as tio
+import torch
+from torch.utils.data import DataLoader
+import segmentation_models_pytorch as smp
+from tqdm.notebook import tqdm## Segmentation of brain tumor from MRI scans
 
-## Problem definiton
+The goal is to segment different types of gliomas in pre-operative MRI scans. The [dataset](https://www.med.upenn.edu/cbica/brats2020/data.html) used contains multimodal scans available as NIfTI files (.nii.gz) which describe:
 
-Each MRI consists of 155 240 x 240 patches, in which each pixel is part of a tumor area:
+* native (T1),
+* post-contrast T1-weighted (T1Gd),
+* T2-weighted (T2),
+* T2 Fluid Attenuated Inversion Recovery (T2-FLAIR) volumes, 
+which were acquired with different clinical protocols and various scanners from 19 institutions.
 
-The sub-regions of tumor considered for evaluation are: 
-0. The background,
-1. the necrotic and non-enhancing tumor core (NCR/NET)
-2. the peritumoral edema (ED), 
-3. the GD-enhancing tumor (ET),
+Each MRI consists of 155 240 x 240 patches, in which each pixel is part of a tumor area.
+All MRIs have been segmented manually, by one to four raters, following the same annotation protocol, and their annotations were approved by experienced neuro-radiologists. Annotations comprise 
+* the GD-enhancing tumor (ET — label 4), 
+* the peritumoral edema (ED — label 2), 
+* and the necrotic and non-enhancing tumor core (NCR/NET — label 1). 
 
-According to the [dataset description](https://www.med.upenn.edu/cbica/brats2020/data.html) the multimodel scans are available as NIfTI files (.nii.gz) and describe 
-* a) native (T1)
-* b) post-contrast T1-weighted (T1Gd)
-* c) T2-weighted (T2), 
-* d) T2 Fluid Attenuated Inversion Recovery (T2-FLAIR) volumes.
-
-These were acquired with different clinical protocols and various scanners from multiple (19) institutions.
 The provided data are distributed after their pre-processing, i.e., co-registered to the same anatomical template, interpolated to the same resolution (1 mm^3) and skull-stripped.
 
 
-
-## Libraries and data read
-
-
 ```python
-# helper scripts
+import engine
 import config
 import utils
-import engine
-
+from preprocess import makeDataset
 import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import os
-import segmentation_models_pytorch as smp
+import torchio as tio
 import torch
-from torch_lr_finder import LRFinder
-import nibabel as nib
-
-# Make logfile to flush prints
-import sys
-old_stdout = sys.stdout # keep reference to existing stdout
-sys.stdout = open(config.LOG_FILE, 'w')
+from torch.utils.data import DataLoader
+import segmentation_models_pytorch as smp
+from tqdm.notebook import tqdm
 ```
 
 
 ```python
-df = utils.collectMetadata()
+df = utils.makeFileList()
+for _, paths in df.sample(n = 3, random_state = 1).iterrows():
+    utils.plotSample(paths)
 ```
 
-We have a lot of empty patches (these are usually the first few and last few patches on an MRI that are completely empty), and a lot of patches containing only background (i.e. a brain slice with the background label only).
 
-
-```python
-for figNo in range(4):
     
-    samplePaths = df[['flairPath', 't1Path', 't1cePath', 't2Path', 'labelPath']].sample(n = 1, random_state = figNo + 44).values[0]
-
-    fig, ax = plt.subplots(nrows = 1, ncols = 5, figsize = (15, 5))
-    for idx, pth in enumerate(samplePaths):
-
-        x = np.asarray(nib.load(pth).dataobj)
-        H, W, D = x.shape
-        ax[idx].imshow(x[:, :, D // 2], cmap = 'bone')
-        title = pth.split('/')[-1].split('_')[-1].split('.')[0]
-        ax[idx].set_title(title)
-        ax[idx].axis('off')
-
-```
-
-![alt text](./imm/__results___5_0.png)
-![alt text](./imm/__results___5_1.png)
-![alt text](./imm/__results___5_2.png)
-![alt text](./imm/__results___5_3.png)
-
-flair and t2 files seem to provide information regarding the different labels. t1, t1ce will not be used
-
-## Data split and subsampling
+![png](./imm/output_2_0.png)
+    
 
 
-```python
-lvIdx, tIdx = utils.GroupTrainTestSplit(df['subjectID'], 
-                                        testRatio = config.TEST_RATIO, 
-                                        seedNo    = 15)
 
-lIdx, vIdx  = utils.GroupTrainTestSplit(df['subjectID'].loc[lvIdx], 
-                                        testRatio = config.VAL_RATIO, 
-                                        seedNo    = 17)
+    
+![png](./imm/output_2_1.png)
+    
 
-traindf, valdf, testdf = df.loc[lIdx], df.loc[vIdx], df.loc[tIdx]
 
-traindf = utils.subsample(traindf, config.BACKGROUND_RATIO)
-valdf   = utils.subsample(valdf,   config.BACKGROUND_RATIO)
-```
 
-## Training setup
+    
+![png](./imm/output_2_2.png)
+    
+
+
+### Data split and preprocessing
+
+We will use all MRI types apart from t1 as it does not seem to contain additional information.
+The dataset will be split to train/validation/test sets. Each MRI will be treated as 155 different images of dimensions 240 x 240. From each image, a set of overlapping patches is extracted, and patches containing at least one of the classes are retained (i.e. background only patches are discarded).
+The patches retained are written to .h5 files for faster loading during training
 
 
 ```python
-noTrainSamples, noValSamples = traindf.shape[0], valdf.shape[0]
+# Split the files
+traindf, valdf, testdf = utils.split(df)
 
-trainTr, valTr = engine.makeTransforms(flairPaths = traindf['flairPath'].unique(),
-                                       t2Paths    = traindf['t2Path'].unique(),
-                                       transformationType = config.TRANSFORM_TYPE)
+# Extract patches from the data and save them
+noTrainSamples = makeDataset(dataframe = traindf, filename = '/kaggle/working/train.h5')
+noValSamples   = makeDataset(dataframe = valdf,   filename = '/kaggle/working/val.h5')
 
-trainLoader = utils.makeDataloader(traindf, trainTr, shuffle = True)
-valLoader   = utils.makeDataloader(valdf,   valTr,   shuffle = False)
+print(f'{noTrainSamples} training images')
+print(f'{noValSamples} validation images')
+```
 
-model       = smp.Unet(encoder_name    = config.ENCODER_NAME,
-                       encoder_weights = config.ENCODER_WEIGHTS,
-                       in_channels     = config.ENCODER_IN_CHANNEL,
-                       classes         = config.NO_CLASSES)
+    45375 training images
+    10263 validation images
+    
 
-criterion   = smp.losses.FocalLoss(mode       = 'multiclass',
-                                   alpha      = config.LOSS_ALPHA,
-                                   gamma      = config.LOSS_GAMMA,
-                                   normalized = config.LOSS_NORM)
+### Transformation configuration
 
-optimizer   = torch.optim.Adam(model.parameters(), lr = config.LEARN_RATE)
+
+```python
+include      = ['x1', 'x2', 'x3', 'y']
+label_keys   = 'y'
+labelMapping = {0:0, 1:1, 2:2, 4:3}
+
+# Spatial transformations
+spatial = tio.OneOf({
+            tio.RandomFlip(flip_probability = 1, axes  = (0, 1), 
+                include = include, label_keys = label_keys) : 0.35,
+            tio.RandomAffine(degrees = 20,
+                include = include, label_keys = label_keys) : 0.35,                                
+            tio.RandomAnisotropy(downsampling = (1.5, 2.5), axes = (0, 1),
+                include = include, label_keys = label_keys) : 0.15,
+            tio.RandomElasticDeformation(max_displacement = (2, 2, 0),
+                include = include, label_keys = label_keys) : 0.15},
+            p = 0.95)
+
+# Intensity transformations
+intensity = tio.OneOf({
+                tio.RandomNoise(std = 0.1,
+                    include = include, label_keys = label_keys) : 0.5,
+                tio.RandomBiasField(coefficients = 0.1,
+                    include = include, label_keys = label_keys): 0.5},
+                p = 0.95)
+
+# Histogram stretching
+hist  = tio.RescaleIntensity(out_min_max = (-1, 1), percentiles = (0.5, 99.5),
+            masking_method = utils.maskFunction, include = include, label_keys = label_keys)
+
+# Padding if needed
+pad   = tio.CropOrPad(target_shape = (128, 128, 1), padding_mode = 'minimum', include = include, label_keys = label_keys)
+
+# Label remapping
+remap = tio.RemapLabels(labelMapping, include = include, label_keys = label_keys)
+
+# Final
+trainTransform = tio.Compose([pad, spatial, hist, intensity, remap], copy = False)
+valTransform   = tio.Compose([pad, hist, remap], copy = False)
+testTransform  = tio.Compose([hist, remap], copy = False)
+```
+
+### Training
+
+Unet will be used with a resnet encoder according to the configuration file, Focal loss is used as the criterion with Adam and LR reduction on validation loss plateau.
+
+
+```python
+trainloader = DataLoader(
+                dataset     = utils.BRATSDataset(config.TRAIN_FILE, noTrainSamples, trainTransform),
+                batch_size  = config.BATCHSIZE,
+                num_workers = config.LOADER_WORKERS,
+                pin_memory  = True,
+                shuffle     = True)
+
+valloader  = DataLoader(
+                dataset     = utils.BRATSDataset(config.VAL_FILE, noValSamples, valTransform),
+                batch_size  = config.BATCHSIZE,
+                num_workers = config.LOADER_WORKERS,
+                pin_memory  = True,
+                shuffle     = False)
+
+
+model       = smp.Unet(encoder_name     = config.ENCODER_NAME,
+                       encoder_weights  = config.ENCODER_WEIGHTS,
+                       encoder_depth    = config.ENCODER_DEPTH,
+                       in_channels      = config.ENCODER_IN_CHANNEL,
+                       decoder_channels = config.DECODER_CHANNELS,
+                       classes          = config.NO_CLASSES)
+
+criterion   = smp.losses.FocalLoss(mode  = 'multiclass', gamma = config.LOSS_GAMMA)
+optimizer   = torch.optim.Adam(model.parameters(), lr = config.LEARN_RATE, weight_decay = config.WEIGHT_DECAY)
 scaler      = torch.cuda.amp.GradScaler()
 scheduler   = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', verbose = True,
                                                          factor   = config.SCHEDULER_FACTOR,
                                                          patience = config.SCHEDULER_PATIENCE)
 ```
-
-### Main training loop
 
 
 ```python
@@ -136,125 +176,55 @@ model, optimizer, scheduler, scaler, curEpoch, trainLoss, valLoss, bestValLoss =
     utils.loadCheckpoint(model, optimizer, scheduler, scaler, config.LAST_CHECKPOINT)
 
 for epoch in range(curEpoch, config.EPOCHS):
-    
-    # train 
-    trainLoss   = engine.train(model, criterion, optimizer, scaler, trainLoader) / noTrainSamples
-    
-    # validate
-    valLoss     = engine.validate(model, criterion, valLoader) / noValSamples
-    
-    # reduce LR
+
+    trainLoss   = engine.train(model, criterion, optimizer, scaler, trainloader) / noTrainSamples
+    valLoss     = engine.validate(model, criterion, valloader) / noValSamples
     if scheduler is not None: scheduler.step(valLoss)
-        
-    # Make checkpoint
     bestValLoss = utils.makeCheckpoint(epoch, model, optimizer, scheduler, scaler, trainLoss, valLoss, bestValLoss)
     
+    
+trainloader.dataset.file.close() # Close .h5 files at the end of training/validation
+valloader.dataset.file.close() 
 ```
 
-## Test set predictions
+### Test set predictions
 
 
 ```python
-# Make sure subjects and patches appear in sorted orded
-testdf = testdf.sort_values(['subjectID', 'patch']).reset_index()
+model.eval()
 
-# Make dataloader
-testLoader   = utils.makeDataloader(testdf, valTr, 
-                                    batchSize = D, # One MRI is one batch
-                                    shuffle   = False)
+saveOutput = True
+TP, FP, FN, TN = 0, 0, 0, 0
 
-# Load model from best checkpoint
-checkpoint = torch.load(config.BEST_CHECKPOINT, map_location=torch.device('cpu'))
-model      = smp.Unet(encoder_name    = config.ENCODER_NAME,
-                      encoder_weights = config.ENCODER_WEIGHTS,
-                      in_channels     = config.ENCODER_IN_CHANNEL,
-                      classes         = config.NO_CLASSES)
+with torch.no_grad():
 
-model.load_state_dict(checkpoint['model_state_dict']);
+    for idx, paths in tqdm(testdf.iterrows(), total = testdf.shape[0]):
+        
+        # Predict
+        x, y, yhat = engine.predict(paths, model,
+                                    transform   = testTransform, 
+                                    patchStride = config.PATCH_SIZE, # No overlap
+                                    device      = 'cpu')
+        
+        # Grab stats
+        tp, fp, fn, tn = smp.metrics.functional.get_stats(yhat, y, mode = 'multiclass', 
+                                                          num_classes = config.NO_CLASSES)
+        TP += tp.sum(dim = 0)
+        FP += fp.sum(dim = 0)
+        FN += fn.sum(dim = 0)
+        TN += tn.sum(dim = 0)
+    
+        # Save to file
+        if saveOutput: 
+            utils.makeGifs(x, y, yhat, folder = './outputs/' + str(idx) + '/')
+
+# Print metrics on tumor classes
+utils.computeMetrics(TP, FP, FN, TN)
 ```
 
-
-```python
-# Predict on the test set
-sys.stdout = old_stdout # print here
-TP, FP, FN, TN = engine.predict(model, testLoader, batchSize = D, noSamples = testdf.shape[0])
-
-for idx, className in enumerate(['Background', 'NCR/NET', 'ED', 'ET']):
-
-    print(f'---------------------- {className} Class ----------------------')
-    utils.computeMetrics(TP[:, idx], FP[:, idx], FN[:, idx], TN[:, idx])
-    print()
-```
-
----------------------- Background Class ----------------------
-
-Image-wise macro-averaged Accuracy:	    0.998
-
-Image-wise macro-averaged Precision:    0.998
-
-Image-wise macro-averaged Recall:	    0.999
-
-Image-wise macro-averaged Sensitivity:  0.999
-
-Image-wise macro-averaged Specificity:  0.912
-
-Image-wise macro-averaged F1 Score:	    0.999
-
-Image-wise macro-averaged F2 Score:	    0.999
-
-Image-wise macro-averaged IoU Score:    0.997
-
----------------------- NCR/NET Class ----------------------
-
-Image-wise macro-averaged Accuracy:	    0.997
-
-Image-wise macro-averaged Precision:	0.885
-
-Image-wise macro-averaged Recall:	    0.880
-
-Image-wise macro-averaged Sensitivity:	0.880
-
-Image-wise macro-averaged Specificity:	0.998
-
-Image-wise macro-averaged F1 Score:	    0.814
-
-Image-wise macro-averaged F2 Score:	    0.823
-
-Image-wise macro-averaged IoU Score:	0.791
-
----------------------- ED Class ----------------------
-
-Image-wise macro-averaged Accuracy:	    0.996
-
-Image-wise macro-averaged Precision:	0.859
-
-Image-wise macro-averaged Recall:	    0.852
-
-Image-wise macro-averaged Sensitivity:	0.852
-
-Image-wise macro-averaged Specificity:	0.998
-
-Image-wise macro-averaged F1 Score:	    0.801
-
-Image-wise macro-averaged F2 Score:	    0.801
-
-Image-wise macro-averaged IoU Score:	0.758
-
----------------------- ET Class ----------------------
-
-Image-wise macro-averaged Accuracy:	    0.997
-
-Image-wise macro-averaged Precision:	0.830
-
-Image-wise macro-averaged Recall:	    0.848
-
-Image-wise macro-averaged Sensitivity:	0.848
-
-Image-wise macro-averaged Specificity:	0.999
-
-Image-wise macro-averaged F1 Score:	    0.773
-
-Image-wise macro-averaged F2 Score:	    0.771
-
-Image-wise macro-averaged IoU Score:	0.750
+    Precision:	 [0.77  0.781 0.724]
+    Recall: 	 [0.827 0.821 0.838]
+    Accuracy:	 [0.998 0.997 0.999]
+    IoU score:	 [0.742 0.732 0.735]
+    DICE score:	 [0.784 0.798 0.787]
     
