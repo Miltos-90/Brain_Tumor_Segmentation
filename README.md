@@ -223,6 +223,6 @@ utils.computeMetrics(TP, FP, FN, TN)
 Segmentation examples:
 
 <p float="left">
-<img src="./imm/example_1.png" width="480" height="480" />
-<img src="./imm/example_2.png" width="480" height="480" />
+<img src="./imm/example_1.png" width="400" height="400" />
+<img src="./imm/example_2.png" width="400" height="400" />
 </p>
