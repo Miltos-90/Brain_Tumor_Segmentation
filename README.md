@@ -219,3 +219,9 @@ utils.computeMetrics(TP, FP, FN, TN)
     IoU score:	 [0.742 0.732 0.735]
     DICE score:	 [0.784 0.798 0.787]
     
+
+Resulting segmentations:
+
+Input MRI             |  Actual labels | Predictions
+:-------------------------:|:-------------------------:|:-------------------------:
+<img src="./imm/mri.gif" width="240" height="240" /> | <img src="./imm/act.gif" width="240" height="240" /> | <img src="./imm/pred.gif" width="240" height="240" /> 
