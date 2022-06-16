@@ -220,8 +220,9 @@ utils.computeMetrics(TP, FP, FN, TN)
     DICE score:	 [0.784 0.798 0.787]
     
 
-Resulting segmentations:
+Segmentation examples:
 
-Input MRI             |  Actual labels | Predictions
-:-------------------------:|:-------------------------:|:-------------------------:
-<img src="./imm/mri.gif" width="240" height="240" /> | <img src="./imm/act.gif" width="240" height="240" /> | <img src="./imm/pred.gif" width="240" height="240" /> 
+<p float="left">
+<img src="./imm/example_1.png" width="480" height="480" />
+<img src="./imm/example_2.png" width="480" height="480" />
+</p>
