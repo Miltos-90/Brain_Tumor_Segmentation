@@ -1,13 +1,4 @@
-import engine
-import config
-import utils
-from preprocess import makeDataset
-import pandas as pd
-import torchio as tio
-import torch
-from torch.utils.data import DataLoader
-import segmentation_models_pytorch as smp
-from tqdm.notebook import tqdm## Segmentation of brain tumor from MRI scans
+## Semantic segmentation of brain tumors from pre-operative MRI scans
 
 The goal is to segment different types of gliomas in pre-operative MRI scans. The [dataset](https://www.med.upenn.edu/cbica/brats2020/data.html) used contains multimodal scans available as NIfTI files (.nii.gz) which describe:
 
